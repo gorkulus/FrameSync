@@ -1,0 +1,12 @@
+{
+  "slug": "FrameSync",
+  "name": "FrameSync",
+  "version": "2.1.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "FrameSync",
+  "author": "FrameSync contributors",
+  "modules": [
+    {"slug": "Recorder", "name": "FrameSync Recorder", "description": "60 fps region video with stereo audio and 16-channel CV CSV recording", "tags": ["Recording", "Visual", "Polyphonic"]},
+    {"slug": "SyncTest", "name": "Sync Check", "description": "Visual binary counter and sample-timed CV for verifying recorded synchronization", "tags": ["Visual", "Utility"]}
+  ]
+}

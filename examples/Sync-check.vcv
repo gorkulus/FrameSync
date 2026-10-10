@@ -1,0 +1,65 @@
+{
+  "version": "2.6.6",
+  "zoom": 1.0,
+  "gridOffset": [
+    0,
+    0
+  ],
+  "modules": [
+    {
+      "id": 1,
+      "plugin": "FrameSync",
+      "model": "Recorder",
+      "version": "2.0.2",
+      "pos": [
+        36,
+        0
+      ],
+      "data": {
+        "size": 512,
+        "regionSet": false,
+        "cvDelayFrames": 0
+      }
+    },
+    {
+      "id": 2,
+      "plugin": "FrameSync",
+      "model": "SyncTest",
+      "version": "2.0.2",
+      "pos": [
+        0,
+        0
+      ],
+      "data": {
+        "autoRun": false,
+        "duration": 10
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 1,
+      "outputModuleId": 1,
+      "outputId": 0,
+      "inputModuleId": 2,
+      "inputId": 0,
+      "color": "#40e0d0"
+    },
+    {
+      "id": 2,
+      "outputModuleId": 2,
+      "outputId": 0,
+      "inputModuleId": 1,
+      "inputId": 0,
+      "color": "#e04080"
+    },
+    {
+      "id": 3,
+      "outputModuleId": 2,
+      "outputId": 1,
+      "inputModuleId": 1,
+      "inputId": 3,
+      "color": "#8040e0"
+    }
+  ]
+}

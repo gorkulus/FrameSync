@@ -1,0 +1,14 @@
+/build/
+/dist/
+/plugin.so
+/plugin.dll
+/plugin.dylib
+/Rack-SDK/
+/dep/
+*.vcvplugin
+*.partial.*
+*.encoder.log
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

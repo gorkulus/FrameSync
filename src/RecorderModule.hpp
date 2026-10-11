@@ -5,6 +5,8 @@
 #include <osdialog.h>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <filesystem>
 
 using framesync::State;
 
@@ -32,6 +34,10 @@ struct FrameSync : Module {
 #endif
 
     FrameSync() {
+        // Optional per-user external encoder location; never bundle FFmpeg.
+        std::ifstream encoderSetting(std::filesystem::u8path(asset::user("FrameSync-ffmpeg.txt")));
+        std::getline(encoderSetting, config.ffmpegPath);
+        if (!config.ffmpegPath.empty() && config.ffmpegPath.back() == '\r') config.ffmpegPath.pop_back();
         Module::config(0, NUM_INPUTS, NUM_OUTPUTS, 0);
         configInput(GATE, "Record gate (high records, low stops)");
         configInput(START, "Start recording"); configInput(STOP, "Stop recording");
@@ -98,6 +104,11 @@ struct FrameSync : Module {
         char* path = osdialog_file(OSDIALOG_OPEN_DIR, config.directory.empty() ? nullptr : config.directory.c_str(), nullptr, nullptr);
         if (path) { config.directory = path; std::free(path); }
     }
+    void chooseEncoder() {
+        if (active()) return;
+        char* path = osdialog_file(OSDIALOG_OPEN, nullptr, nullptr, nullptr);
+        if (path) { config.ffmpegPath = path; std::free(path); }
+    }
     void arm() {
         if (capture.state() == State::Recording) { command = 2; capture.disarm(); return; }
         if (active()) { capture.disarm(); return; }
@@ -110,6 +121,7 @@ struct FrameSync : Module {
     json_t* dataToJson() override {
         json_t* j = json_object();
         json_object_set_new(j, "directory", json_string(config.directory.c_str()));
+        json_object_set_new(j, "ffmpegPath", json_string(config.ffmpegPath.c_str()));
         json_object_set_new(j, "prefix", json_string(config.prefix.c_str()));
         json_object_set_new(j, "size", json_integer(config.size));
         json_object_set_new(j, "cvDelayFrames", json_integer(config.cvDelayFrames));
@@ -125,6 +137,7 @@ struct FrameSync : Module {
         testArmOnLoad = json_is_true(json_object_get(j, "testArmOnLoad"));
 #endif
         if (json_is_string(json_object_get(j, "directory"))) config.directory = json_string_value(json_object_get(j, "directory"));
+        if (json_is_string(json_object_get(j, "ffmpegPath"))) config.ffmpegPath = json_string_value(json_object_get(j, "ffmpegPath"));
         if (json_is_string(json_object_get(j, "prefix"))) config.prefix = json_string_value(json_object_get(j, "prefix"));
         config.size = json_integer_value(json_object_get(j, "size")) == 1024 ? 1024 : 512;
         // Preserve the saved amount from versions 2.0.x, now applied to CSV only.

@@ -1,15 +1,21 @@
-# FrameSync Recorder 2.1.0 — Linux
+# FrameSync Recorder 2.1.1 — Linux and Windows
 
-Windows support is not implemented yet. See [Windows port and setup handoff](WINDOWS-HANDOFF.md).
+Native Windows support uses CreateProcessW, cancellable pipe writes, and Unicode
+filesystem paths. See [Windows setup](WINDOWS-SETUP.md) and `VALIDATION.md`.
 
 A separately named Rack 2 plugin based on VCV Recorder's framebuffer capture
 approach, with 60 fps H.264 video, embedded stereo AAC audio, and 16-channel
 frame-onset CSV recording.
 
-This Linux build uses the installed `/usr/bin/ffmpeg` with its libx264 encoder.
+Linux defaults to `/usr/bin/ffmpeg`; Windows resolves `ffmpeg.exe` on PATH.
+An explicit executable can be selected in the module's context menu and is saved
+with the patch. `FRAMESYNC_FFMPEG` overrides the default when no explicit setting
+is selected. Windows also accepts a per-user default in `FrameSync-ffmpeg.txt`
+inside Rack's user folder (one UTF-8 executable path).
 It never invokes a shell or links FFmpeg libraries into Rack's process.
 
-Install the `.vcvplugin` package in Rack's `plugins-lin-x64` folder, then restart
+Install the matching `.vcvplugin` package in Rack's `plugins-lin-x64` or
+`plugins-win-x64` folder, then restart
 Rack. Search the module browser for **FrameSync**. It installs alongside VCV
 Recorder and does not replace it. The source and panel are GPL-3.0-or-later.
 See `VALIDATION.md` for current functional checks and historical visual timing measurements.

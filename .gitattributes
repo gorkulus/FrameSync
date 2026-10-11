@@ -1,0 +1,8 @@
+# Keep source and build recipes consistent in Windows and Linux checkouts.
+* text=auto
+Makefile text eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf

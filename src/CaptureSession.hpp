@@ -12,6 +12,7 @@ enum class State { Idle, Preparing, Priming, Ready, Recording, Finishing, Error 
 
 struct Config {
     std::string directory;
+    std::string ffmpegPath; // UTF-8; empty uses FRAMESYNC_FFMPEG or platform default/PATH.
     std::string prefix = "take";
     int size = 512;
     int fps = 60;

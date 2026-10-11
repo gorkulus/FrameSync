@@ -1,4 +1,59 @@
-# FrameSync 2.1.0 validation — 18 September 2026
+# FrameSync validation
+
+## Version 2.1.1: native Windows port — 10 October 2026
+
+Built with the official Rack SDK 2.6.6 Windows x64 and MSYS2 MinGW64 GCC 16.2.0;
+tested against installed Rack Pro 2.6.6 and FFmpeg 9.0.2 (Gyan essentials).
+The source and plugin remain private. Linux runtime tests were not repeated on
+this Windows installation; its original process backend and defaults are retained.
+
+`make test`, `make test-controls`, and `make test-windows` passed. The output
+validators decoded the actual MP4/AAC streams and inspected CSV/metadata:
+
+- Stereo tones, polyphonic summing, L-to-R mono normalization, silence, and
+  48,001 Hz resampling passed. Video and audio start at zero; presentation
+  duration matches the exact 60 fps frame count.
+- A one-bar TOGGLE take retained 96,000 engine samples, 120 video frames and
+  CSV rows. One-sample/partial-frame takes retained their sample counts and
+  padded audio only to the final video-frame boundary.
+- Off versus two-frame CSV compensation changed only CSV sources: decoded
+  audio and video were identical for identical input. Pre-trigger history,
+  timestamp columns, saved-setting migration, and stable input IDs passed.
+- STOP priority, held/busy/disarmed edges, repeated recordings, and auto-rearm
+  passed. Tests exposed and fixed a START/disarm publication race.
+- Both 512 and 1024 pixel sizes recorded successfully with spaces/non-ASCII
+  characters in output and executable paths. Concurrent reservations produced
+  distinct take numbers, without collisions or leftover successful temp files.
+- Missing, exited, and stalled encoder children failed clearly. Pipe writes
+  timed out within twelve seconds; cancellation/shutdown completed within three
+  seconds in the deliberate stalled-child tests. Failed takes kept diagnostics.
+
+Short isolated Rack GUI captures ran on the NVIDIA RTX 4090 at Windows 150%
+display scaling (Rack automatic pixel ratio), using the synthetic Sync Check
+patch at 50% patch zoom so barcode pixels could be decoded. No audio device was
+opened. This checks real GL_FRONT framebuffer reads and physical crop dimensions,
+rather than only synthetic worker buffers. These recordings contain silence;
+stereo routing/tone validation used the real module processor tests above.
+
+The initial 512/Off take produced 180 matching video/CSV frames and 144,000 audio
+samples in three seconds, without capture-queue overflow. Its barcode showed
+mostly two frames of render lag, with occasional three-frame observations. This
+is a functional observation, not a universal calibration for Windows or NYSTHI.
+Historical Linux measurements below are retained as separate results.
+
+Four three-second GUI takes covered both 512/1024 sizes and Off/two-frame CSV
+delay. Each produced 180 matched video/CSV frames, 144,000 engine audio samples,
+48 kHz stereo AAC with aligned three-second presentation, and zero capture-queue
+overflows. Barcode decoding passed for all 16 CV channels. Off showed mostly
+two-frame render lag; compensation brought most measured rows to zero lag,
+with occasional one-frame differences. These short takes do not establish an
+exhaustive latency benchmark or calibrate other scopes/plugins.
+
+The interactive AREA mouse/keyboard workflow and arbitrary third-party scope
+patches still need the user's first-use check. The GUI harness selected the crop
+through the same framebuffer-coordinate scaling, without exercising mouse input.
+
+## Version 2.1.0 validation — 18 September 2026
 
 ## Version 2.1.0: stereo audio and CSV-only correction
 

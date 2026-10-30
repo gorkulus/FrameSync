@@ -12,6 +12,7 @@ enum class State { Idle, Preparing, Priming, Ready, Recording, Finishing, Error 
 
 struct Config {
     std::string directory;
+    std::string ffmpegPath; // UTF-8; empty uses FRAMESYNC_FFMPEG or platform default/PATH.
     std::string prefix = "take";
     int size = 512;
     int fps = 60;
@@ -30,9 +31,24 @@ struct Pixels {
     uint64_t generation = 0;
 };
 
+#ifdef FRAMESYNC_TEST_HOOKS
+// Only the dedicated regression executable compiles these synchronization seams.
+// Callbacks may block test threads; no hook storage/calls exist in the plugin.
+enum class TestPoint { BeginChecked, RecordingPublished, EventsDrained,
+    BeforeCancelClaim, CancellationChecked, CleanupClaimed, Primed, Ready, Settled, Count };
+struct TestHooks {
+    void* context = nullptr;
+    void (*call)(void*, TestPoint, bool) = nullptr;
+};
+#endif
+
 class CaptureSession {
 public:
+#ifdef FRAMESYNC_TEST_HOOKS
+    explicit CaptureSession(TestHooks* hooks = nullptr);
+#else
     CaptureSession();
+#endif
     ~CaptureSession();
     bool arm(const Config& config); // GUI thread, never the audio callback
     void disarm();
@@ -58,9 +74,19 @@ private:
     void setMessage(const std::string& text);
     bool push(const Event& e);
     bool flushAudio();
+    bool cancelUnstarted(); // worker: atomically close Ready/Priming admission
+    void closeAdmission(); // worker: retire a take before exposing Idle/Error
+#ifdef FRAMESYNC_TEST_HOOKS
+    void testHook(TestPoint point, bool value = false) {
+        if (testHooks_ && testHooks_->call) testHooks_->call(testHooks_->context, point, value);
+    }
+    TestHooks* testHooks_ = nullptr;
+#endif
     std::atomic<State> state_{State::Idle};
     std::atomic<bool> quit_{false}, keepArmed_{false}, overflow_{false}, failed_{false};
     std::atomic<bool> audioOverflow_{false};
+    std::atomic<bool> startPublishing_{false}; // engine begin() publication in flight
+    uint64_t producerGeneration_ = 0; // engine only; never retag a late event/block
     std::atomic<uint64_t> encoded_{0}, repeated_{0}, completed_{0}, missedImages_{0};
     std::atomic<uint64_t> generation_{0};
     std::atomic<size_t> pixelBytes_{0};

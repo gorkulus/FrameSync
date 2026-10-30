@@ -14,14 +14,7 @@
 #include <set>
 #include <stdexcept>
 #include <cerrno>
-#include <fcntl.h>
-#include <poll.h>
-#include <pthread.h>
-#include <signal.h>
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
-extern char** environ;
+#include "Encoder.hpp"
 
 namespace framesync {
 namespace fs = std::filesystem;
@@ -49,112 +42,11 @@ static std::string jsonQuote(const std::string& value) {
     return s.str() + '"';
 }
 
-// Isolate FFmpeg in its own process. Stock VCV Recorder exports an older set of
-// libav symbols; linking a newer system libav inside the same Rack process can
-// interpose those symbols. No shell is used, and encoding happens during capture.
-class VideoEncoder {
-    pid_t pid_ = -1;
-    int input_ = -1;
-public:
-    ~VideoEncoder() { cancel(); }
-    void open(const Config& c, const std::string& path, const std::string& log) {
-        int fds[2];
-        if (pipe2(fds, O_CLOEXEC)) throw std::runtime_error("Cannot create encoder pipe");
-        int logFd = ::open(log.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (logFd < 0) { ::close(fds[0]); ::close(fds[1]); throw std::runtime_error("Cannot create encoder log"); }
-        std::vector<std::string> arguments = {
-            "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-n",
-            "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", std::to_string(c.size) + "x" + std::to_string(c.size),
-            "-framerate", std::to_string(c.fps), "-i", "pipe:0", "-an", "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", std::to_string(c.crf), "-pix_fmt", "yuv420p",
-            "-threads", "4", "-g", "1", "-bf", "0", "-movflags", "+faststart", "-f", "mp4", path
-        };
-        std::vector<char*> argv;
-        for (auto& a : arguments) argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_adddup2(&actions, fds[0], STDIN_FILENO);
-        posix_spawn_file_actions_adddup2(&actions, logFd, STDOUT_FILENO);
-        posix_spawn_file_actions_adddup2(&actions, logFd, STDERR_FILENO);
-        posix_spawn_file_actions_addclose(&actions, fds[1]);
-        int result = posix_spawn(&pid_, argv[0], &actions, nullptr, argv.data(), environ);
-        posix_spawn_file_actions_destroy(&actions);
-        ::close(fds[0]); ::close(logFd);
-        if (result) { ::close(fds[1]); pid_ = -1; throw std::runtime_error("Cannot start /usr/bin/ffmpeg: " + std::string(strerror(result))); }
-        input_ = fds[1];
-        fcntl(input_, F_SETFL, fcntl(input_, F_GETFL) | O_NONBLOCK);
-    }
-    void write(const std::vector<uint8_t>& bytes, const std::atomic<bool>& quitting) {
-        size_t offset = 0;
-        auto deadline = Clock::now() + std::chrono::seconds(10);
-        while (offset < bytes.size()) {
-            ssize_t n = ::write(input_, bytes.data() + offset, bytes.size() - offset);
-            if (n > 0) { offset += size_t(n); continue; }
-            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                throw std::runtime_error("Video encoder stopped; see the take's encoder log");
-            if (Clock::now() > deadline || quitting.load()) throw std::runtime_error("Video encoder timed out or capture was interrupted");
-            pollfd p{input_, POLLOUT, 0}; poll(&p, 1, 20);
-        }
-    }
-    void finish(const std::atomic<bool>& quitting, double timeout = 15) {
-        if (input_ >= 0) { ::close(input_); input_ = -1; }
-        auto deadline = Clock::now() + std::chrono::milliseconds(int64_t(timeout * 1000));
-        while (pid_ > 0) {
-            int status = 0;
-            pid_t r = waitpid(pid_, &status, WNOHANG);
-            if (r == pid_) {
-                pid_ = -1;
-                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) throw std::runtime_error("FFmpeg could not finalize the MP4; see encoder log");
-                return;
-            }
-            if (r < 0 && errno != EINTR) throw std::runtime_error("Cannot wait for encoder");
-            if (quitting.load()) throw std::runtime_error("Encoding interrupted; partial take preserved");
-            if (Clock::now() > deadline) throw std::runtime_error("Encoder finalization timed out");
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
-    void muxAudio(const Config& c, const std::string& video, const std::string& audio,
-                  const std::string& output, const std::string& log, int64_t frames,
-                  const std::atomic<bool>& quitting) {
-        // Video is copied losslessly. Encode the exact engine-sample audio, and
-        // pad only the fraction of the last video frame after the recording gate.
-        // Both streams start at zero; CSV correction never changes either stream.
-        int64_t outputSamples = frames * (48000 / c.fps);
-        std::vector<std::string> arguments = {
-            "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "warning", "-nostdin", "-n",
-            "-i", video, "-f", "f32le", "-ar", std::to_string(c.sampleRate), "-ac", "2", "-i", audio,
-            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
-            "-ar", "48000", "-ac", "2", "-af",
-            "aresample=48000,apad=whole_len=" + std::to_string(outputSamples) + ",atrim=end_sample=" + std::to_string(outputSamples),
-            "-movflags", "+faststart", "-f", "mp4", output
-        };
-        std::vector<char*> argv;
-        for (auto& a : arguments) argv.push_back(const_cast<char*>(a.c_str()));
-        argv.push_back(nullptr);
-        int fd = ::open(log.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
-        if (fd < 0) throw std::runtime_error("Cannot open audio encoder log");
-        posix_spawn_file_actions_t actions;
-        posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-        posix_spawn_file_actions_adddup2(&actions, fd, STDOUT_FILENO);
-        posix_spawn_file_actions_adddup2(&actions, fd, STDERR_FILENO);
-        int result = posix_spawn(&pid_, argv[0], &actions, nullptr, argv.data(), environ);
-        posix_spawn_file_actions_destroy(&actions); ::close(fd);
-        if (result) { pid_ = -1; throw std::runtime_error("Cannot start audio encoder: " + std::string(strerror(result))); }
-        finish(quitting, 30. + double(frames) / c.fps / 2.);
-    }
-    void cancel() {
-        if (input_ >= 0) { ::close(input_); input_ = -1; }
-        if (pid_ > 0) {
-            kill(pid_, SIGKILL);
-            while (waitpid(pid_, nullptr, 0) < 0 && errno == EINTR) {}
-            pid_ = -1;
-        }
-    }
-};
-
+#ifdef FRAMESYNC_TEST_HOOKS
+CaptureSession::CaptureSession(TestHooks* hooks) : testHooks_(hooks), worker_([this] { run(); }) {}
+#else
 CaptureSession::CaptureSession() : worker_([this] { run(); }) {}
+#endif
 CaptureSession::~CaptureSession() { shutdown(); }
 void CaptureSession::shutdown() {
     keepArmed_ = false; quit_ = true; wake_.notify_all();
@@ -165,7 +57,7 @@ std::string CaptureSession::lastTake() const { std::lock_guard<std::mutex> l(tex
 void CaptureSession::setMessage(const std::string& s) { std::lock_guard<std::mutex> l(textMutex_); message_ = s; }
 bool CaptureSession::arm(const Config& c) {
     State s = state();
-    if (s != State::Idle && s != State::Error) return false;
+    if (quit_ || (s != State::Idle && s != State::Error)) return false;
     if (c.directory.empty() || (c.size != 512 && c.size != 1024) || c.fps != 60 || c.sampleRate < 8000 || c.sampleRate > 768000
         || c.cvDelayFrames < 0 || c.cvDelayFrames > 4) {
         setMessage("Choose an output folder and valid capture settings"); return false;
@@ -184,15 +76,58 @@ void CaptureSession::disarm() { keepArmed_ = false; wake_.notify_one(); }
 bool CaptureSession::push(const Event& event) {
     auto* e = events_.reserve();
     if (!e) { overflow_ = true; return false; }
-    *e = event; e->generation = generation_.load(); events_.commit(); return true;
+    *e = event; e->generation = producerGeneration_; events_.commit(); return true;
 }
 bool CaptureSession::begin(int64_t sample) {
-    if (!keepArmed_.load()) return false;
+    // Single engine producer. The worker may wait for publication on teardown;
+    // the engine never waits, locks, allocates, or performs file I/O here.
+    startPublishing_.store(true, std::memory_order_release);
+    if (!keepArmed_.load() || quit_.load()) {
+        startPublishing_.store(false, std::memory_order_release); return false;
+    }
+#ifdef FRAMESYNC_TEST_HOOKS
+    testHook(TestPoint::BeginChecked);
+#endif
     State ready = State::Ready;
-    if (!state_.compare_exchange_strong(ready, State::Recording)) return false;
+    if (!state_.compare_exchange_strong(ready, State::Recording)) {
+        startPublishing_.store(false, std::memory_order_release); return false;
+    }
+    producerGeneration_ = generation_.load();
     audioPartial_.count = 0;
-    Event e; e.type = Event::Start; e.sample = sample; return push(e);
+#ifdef FRAMESYNC_TEST_HOOKS
+    testHook(TestPoint::RecordingPublished);
+#endif
+    Event e; e.type = Event::Start; e.sample = sample;
+    bool accepted = push(e);
+    startPublishing_.store(false, std::memory_order_release);
+    return accepted;
 }
+
+bool CaptureSession::cancelUnstarted() {
+    // A snapshot-only guard is insufficient: begin() could claim Ready after
+    // that snapshot. This CAS and begin()'s CAS arbitrate on the SAME atomic.
+    // If begin wins, Recording/Finishing must keep draining until Stop arrives.
+    // If cancellation wins, begin fails and cannot publish an accepted Start.
+    State available = state();
+#ifdef FRAMESYNC_TEST_HOOKS
+    testHook(TestPoint::BeforeCancelClaim);
+#endif
+    return (available == State::Ready || available == State::Priming)
+        && state_.compare_exchange_strong(available, State::Finishing);
+}
+
+void CaptureSession::closeAdmission() {
+    // On shutdown/error, prevent further admission before waiting for a Start
+    // already claimed by the engine. The acquire pairs with its release after
+    // queue publication. Only the worker consumes queues/advances generations.
+    state_.exchange(State::Finishing);
+#ifdef FRAMESYNC_TEST_HOOKS
+    testHook(TestPoint::CleanupClaimed);
+#endif
+    while (startPublishing_.load(std::memory_order_acquire))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
 bool CaptureSession::frame(int64_t index, int64_t sample, const std::array<float, CHANNELS>& cv, int64_t cvSample, bool cvClamped) {
     if (state() != State::Recording) return false;
     Event e; e.type = Event::Frame; e.index = index; e.sample = sample; e.cv = cv;
@@ -202,7 +137,7 @@ bool CaptureSession::flushAudio() {
     if (!audioPartial_.count) return true;
     auto* block = audioBlocks_->reserve();
     if (!block) { audioOverflow_ = true; audioPartial_.count = 0; return false; }
-    *block = audioPartial_; block->generation = generation_.load();
+    *block = audioPartial_; block->generation = producerGeneration_;
     audioBlocks_->commit(); audioPartial_.count = 0; return true;
 }
 bool CaptureSession::audio(int64_t sample, float left, float right) {
@@ -215,10 +150,11 @@ bool CaptureSession::audio(int64_t sample, float left, float right) {
     return audioPartial_.count < AUDIO_BLOCK_SAMPLES || flushAudio();
 }
 void CaptureSession::end(int64_t sample) {
-    if (state() != State::Recording) return;
+    State recording = State::Recording;
+    if (!state_.compare_exchange_strong(recording, State::Finishing)) return;
     flushAudio();
     Event e; e.type = Event::Stop; e.sample = sample;
-    state_.store(State::Finishing); push(e);
+    push(e);
 }
 bool CaptureSession::wantsPixels() const {
     State s = state(); return s == State::Priming || s == State::Ready || s == State::Recording;
@@ -236,8 +172,10 @@ void CaptureSession::fail(const std::string& reason) { setMessage(reason); faile
 
 void CaptureSession::run() {
     // A failed encoder must never deliver SIGPIPE to Rack's process.
+#ifndef _WIN32
     sigset_t blocked; sigemptyset(&blocked); sigaddset(&blocked, SIGPIPE);
     pthread_sigmask(SIG_BLOCK, &blocked, nullptr);
+#endif
     while (!quit_) {
         if (state() != State::Preparing) {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -258,6 +196,16 @@ void CaptureSession::run() {
         std::deque<Event> pending;
         std::deque<Pixels> history;
         auto lastImageAt = Clock::now();
+        auto recoverStartForFailure = [&] {
+            // Teardown has closed admission and waited for begin(). Preserve a
+            // claimed but not yet drained Start in interrupted-take diagnostics.
+            while (Event* ptr = events_.front()) {
+                Event e = *ptr; events_.pop();
+                if (e.generation != gen) continue;
+                if (e.type == Event::Start) { started = true; origin = stopSample = e.sample; }
+                else if (e.type == Event::Stop) stopSample = e.sample;
+            }
+        };
         auto captureTarget = [&](const Event& e) {
             return e.sample;
         };
@@ -287,31 +235,42 @@ void CaptureSession::run() {
             encoded_++;
         };
         try {
-            fs::create_directories(c.directory);
+            fs::create_directories(utf8Path(c.directory));
             std::string prefix;
             for (unsigned char ch : c.prefix) if (std::isalnum(ch) || ch == '_' || ch == '-') prefix += char(ch);
             if (prefix.empty()) prefix = "take";
             for (int i = 1; i < 1000000; ++i) {
                 std::ostringstream s; s << prefix << '-' << std::setw(4) << std::setfill('0') << i;
-                std::string candidate = (fs::path(c.directory) / s.str()).string();
-                if (fs::exists(candidate + ".mp4") || fs::exists(candidate + ".csv") || fs::exists(candidate + ".json") || fs::exists(candidate + ".partial.mp4") || fs::exists(candidate + ".partial.csv")
-                    || fs::exists(candidate + ".partial.video.mp4") || fs::exists(candidate + ".partial.audio.f32")) continue;
+                std::string candidate = (utf8Path(c.directory) / s.str()).u8string();
+                if (fs::exists(utf8Path(candidate + ".mp4")) || fs::exists(utf8Path(candidate + ".csv")) || fs::exists(utf8Path(candidate + ".json")) || fs::exists(utf8Path(candidate + ".partial.mp4")) || fs::exists(utf8Path(candidate + ".partial.csv"))
+                    || fs::exists(utf8Path(candidate + ".partial.video.mp4")) || fs::exists(utf8Path(candidate + ".partial.audio.f32"))) continue;
+#ifdef _WIN32
+                HANDLE reservation = CreateFileW(utf8Path(candidate + ".reserve").c_str(), GENERIC_WRITE,
+                    0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (reservation != INVALID_HANDLE_VALUE) { CloseHandle(reservation); base = candidate; break; }
+                if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS)
+                    throw std::runtime_error("Cannot reserve a take in the output folder");
+#else
                 int fd = ::open((candidate + ".reserve").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
                 if (fd >= 0) { ::close(fd); base = candidate; break; }
                 if (errno != EEXIST) throw std::runtime_error("Cannot reserve a take in the output folder");
+#endif
             }
             if (base.empty()) throw std::runtime_error("No free take number");
-            csv.open(base + ".partial.csv", std::ios::out | std::ios::trunc);
+            csv.open(utf8Path(base + ".partial.csv"), std::ios::out | std::ios::trunc);
             csv.imbue(std::locale::classic());
             if (!csv) throw std::runtime_error("Cannot open CSV");
             csv << "frame,time_seconds,sample_index";
             for (const auto& name : c.names) csv << ',' << csvQuote(name);
             csv << ",capture_sample_index,capture_offset_ms,repeated_image,cv_sample_index,cv_time_seconds,cv_history_clamped\n";
-            audioFile.open(base + ".partial.audio.f32", std::ios::binary | std::ios::out | std::ios::trunc);
+            audioFile.open(utf8Path(base + ".partial.audio.f32"), std::ios::binary | std::ios::out | std::ios::trunc);
             if (!audioFile) throw std::runtime_error("Cannot open temporary audio file");
             encoder.open(c, base + ".partial.video.mp4", base + ".encoder.log");
             setMessage("Waiting for a clean capture frame");
             state_.store(State::Priming, std::memory_order_release);
+#ifdef FRAMESYNC_TEST_HOOKS
+            testHook(TestPoint::Primed);
+#endif
             while (!quit_) {
                 if (overflow_) throw std::runtime_error("CV queue overflow; take stopped without changing its timeline");
                 if (audioOverflow_) throw std::runtime_error("Audio queue overflow or missing engine samples; take stopped without changing its timeline");
@@ -319,10 +278,13 @@ void CaptureSession::run() {
                 while (Event* ptr = events_.front()) {
                     Event e = *ptr; events_.pop();
                     if (e.generation != gen) continue;
-                    if (e.type == Event::Start) { started = true; origin = e.sample; setMessage("Recording"); }
+                    if (e.type == Event::Start) { started = true; origin = stopSample = e.sample; setMessage("Recording"); }
                     else if (e.type == Event::Frame) pending.push_back(e);
                     else { stopped = true; stopSample = e.sample; }
                 }
+#ifdef FRAMESYNC_TEST_HOOKS
+                testHook(TestPoint::EventsDrained);
+#endif
                 while (auto* block = audioBlocks_->front()) {
                     if (block->generation != gen) { audioBlocks_->pop(); continue; }
                     // Start and audio use different queues. Wait for Start to
@@ -344,6 +306,9 @@ void CaptureSession::run() {
                     history.push_back(*next); pixels_.pop(); lastImageAt = Clock::now();
                     if (state() == State::Priming) {
                         setMessage("Ready — waiting for a recording gate"); state_.store(State::Ready);
+#ifdef FRAMESYNC_TEST_HOOKS
+                        testHook(TestPoint::Ready);
+#endif
                     }
                 }
                 bool flush = stopped || Clock::now() - lastImageAt > std::chrono::milliseconds(250);
@@ -366,8 +331,17 @@ void CaptureSession::run() {
                 }
                 int64_t oldestNeeded = pending.empty() ? INT64_MAX : captureTarget(pending.front());
                 while (history.size() > 8 && history[1].sample <= oldestNeeded) history.pop_front();
-                if ((stopped && pending.empty()) || (!keepArmed_ && !started)) break;
+                bool cancel = !keepArmed_.load() && !started && cancelUnstarted();
+#ifdef FRAMESYNC_TEST_HOOKS
+                testHook(TestPoint::CancellationChecked, cancel);
+#endif
+                if ((stopped && pending.empty()) || cancel) break;
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            closeAdmission();
+            if (quit_) {
+                recoverStartForFailure();
+                if (started) throw std::runtime_error("Recording interrupted by shutdown; partial take preserved");
             }
             if (started && (!stopped || !pending.empty())) throw std::runtime_error("Recording interrupted before all frames were captured; partial take preserved");
             if (started && encoded_ > 0) {
@@ -378,19 +352,19 @@ void CaptureSession::run() {
                 csv.close(); audioFile.close();
                 setMessage("Saving stereo audio + video");
                 encoder.muxAudio(c, base + ".partial.video.mp4", base + ".partial.audio.f32", base + ".partial.mp4", base + ".encoder.log", encoded_.load(), quit_);
-                fs::rename(base + ".partial.mp4", base + ".mp4");
-                fs::rename(base + ".partial.csv", base + ".csv");
-                fs::remove(base + ".partial.video.mp4"); fs::remove(base + ".partial.audio.f32");
+                fs::rename(utf8Path(base + ".partial.mp4"), utf8Path(base + ".mp4"));
+                fs::rename(utf8Path(base + ".partial.csv"), utf8Path(base + ".csv"));
+                fs::remove(utf8Path(base + ".partial.video.mp4")); fs::remove(utf8Path(base + ".partial.audio.f32"));
                 successful = true;
             } else { csv.close(); audioFile.close(); encoder.cancel(); }
         } catch (const std::exception& e) {
-            error = e.what(); state_.store(State::Finishing);
+            error = e.what(); closeAdmission(); recoverStartForFailure();
             encoder.cancel(); csv.close(); audioFile.close(); keepArmed_ = false;
         }
         if (!base.empty()) {
             try {
                 if (started || !error.empty()) {
-                    std::ofstream manifest(base + ".json"); manifest.imbue(std::locale::classic());
+                    std::ofstream manifest(utf8Path(base + ".json")); manifest.imbue(std::locale::classic());
                     manifest << "{\n  \"status\": " << jsonQuote(successful ? "complete" : "error")
                         << ",\n  \"error\": " << jsonQuote(error)
                         << ",\n  \"fps\": " << c.fps << ",\n  \"sample_rate\": " << c.sampleRate
@@ -414,18 +388,21 @@ void CaptureSession::run() {
                     manifest.close();
                     if (!manifest) { error = "Cannot write take metadata"; successful = false; keepArmed_ = false; }
                 } else {
-                    fs::remove(base + ".partial.csv"); fs::remove(base + ".partial.mp4"); fs::remove(base + ".partial.video.mp4"); fs::remove(base + ".partial.audio.f32"); fs::remove(base + ".encoder.log");
+                    fs::remove(utf8Path(base + ".partial.csv")); fs::remove(utf8Path(base + ".partial.mp4")); fs::remove(utf8Path(base + ".partial.video.mp4")); fs::remove(utf8Path(base + ".partial.audio.f32")); fs::remove(utf8Path(base + ".encoder.log"));
                 }
-                fs::remove(base + ".reserve");
+                fs::remove(utf8Path(base + ".reserve"));
             } catch (const std::exception& e) { error = e.what(); successful = false; keepArmed_ = false; }
         }
         if (successful) {
             { std::lock_guard<std::mutex> l(textMutex_); lastTake_ = base; }
-            completed_++; setMessage("Saved " + fs::path(base).filename().string());
+            completed_++; setMessage("Saved " + utf8Path(base).filename().u8string());
         }
         if (!error.empty()) { setMessage(error); state_.store(State::Error); }
         else if (keepArmed_ && !quit_) state_.store(State::Preparing);
         else state_.store(State::Idle);
+#ifdef FRAMESYNC_TEST_HOOKS
+        testHook(TestPoint::Settled);
+#endif
     }
 }
 }

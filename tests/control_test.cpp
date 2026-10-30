@@ -164,6 +164,34 @@ int main() {
         f.module.dataFromJson(saved); json_decref(saved);
         assert(f.module.config.cvDelayFrames == 2); // New field takes precedence.
     }
+    {
+        // Exercise defaults and JSON overrides in a separate temporary Rack user
+        // directory; never read or write the installed profile's configuration.
+        std::string oldUserDir = asset::userDir;
+        auto profile = directory / "encoder profile";
+        fs::create_directories(profile);
+        asset::userDir = fs::absolute(profile).u8string();
+        const std::string defaultPath = u8"C:/encoder space ü/ffmpeg.exe";
+        std::ofstream(profile / "FrameSync-ffmpeg.txt", std::ios::binary) << defaultPath << "\r\nignored second line";
+        {
+            FrameSync module;
+            assert(module.config.ffmpegPath == defaultPath);
+            json_t* data = json_object();
+            module.dataFromJson(data); // Old patches preserve the constructor default.
+            assert(module.config.ffmpegPath == defaultPath);
+            json_object_set_new(data, "ffmpegPath", json_string("explicit executable"));
+            module.dataFromJson(data);
+            assert(module.config.ffmpegPath == "explicit executable");
+            json_t* saved = module.dataToJson();
+            assert(std::string(json_string_value(json_object_get(saved, "ffmpegPath"))) == "explicit executable");
+            json_decref(saved);
+            json_object_set_new(data, "ffmpegPath", json_string(""));
+            module.dataFromJson(data);
+            assert(module.config.ffmpegPath.empty());
+            json_decref(data);
+        }
+        asset::userDir = oldUserDir;
+    }
     std::ofstream("build/last-control-test-directory.txt") << fs::absolute(directory).string();
     std::cout << "Module control tests passed: bar toggling, held triggers, STOP priority, busy edges, CV history, mono/poly audio routing, migration, and stable input IDs.\n";
 }

@@ -7,7 +7,6 @@
 #include <limits>
 #include <cmath>
 #include <thread>
-#include <unistd.h>
 
 using namespace framesync;
 namespace fs = std::filesystem;

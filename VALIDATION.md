@@ -1,4 +1,166 @@
-# FrameSync 2.1.0 validation — 18 September 2026
+# FrameSync validation
+
+macOS is not yet supported.
+
+## Integrated 2.1.2 Linux validation — 29 October 2026
+
+Integrated the platform code and tests from Windows preview commit
+`512c2a9e8050b62d001f04c67b53486e8d32e7d8` with the cleaned Linux documentation
+and repository metadata. Original licenses and Andrew Belt/VCV Recorder
+attribution are unchanged. The following is fresh Linux evidence, separate from
+the historical reports below. Native Windows execution, Windows package building,
+and interactive Windows AREA tests were **not run** in this integration.
+
+### Deterministic START/disarm regressions
+
+`make test-races` compiles the real CaptureSession with test-only callbacks and
+condition-variable gates. Each wait is bounded; no sleep or probabilistic stress
+is used to arrange the race interleavings. Hooks are absent from production builds.
+
+The tests force four schedules:
+
+1. Recording is visible but the Start event has not yet been queued; disarm runs
+   before the worker's cancellation check.
+2. The worker has finished its event drain; Start is queued afterward while the
+   take is still Recording when the cancellation check occurs.
+3. The same event-drain gap with Start/frame/audio/Stop already queued and the
+   take already Finishing before the worker checks cancellation.
+4. begin has read the armed flag; the worker has read Ready after disarm; begin
+   claims the take before the worker's cancellation transition. This exposes the
+   preview guard's separate state-read/decision race.
+
+All four schedules now save the accepted take and end Idle without auto-rearming.
+Every take contains 1,601 start-inclusive/stop-exclusive engine audio samples,
+three 60 fps MP4 frames and CSV rows, followed by a fresh 800-sample/one-frame take
+on the same session with distinct CV data. No stale events contaminate it.
+The suite also checks cancellation winning against a pending begin, disarm before
+any accepted start, empty cleanup, and shutdown while Start publication is paused.
+Interrupted accepted takes preserve partial files/error metadata; unstarted
+shutdown cleans up without claiming a successful recording. Re-arm after final
+shutdown is rejected. Ten successful MP4/CSV/JSON sets are decoded/validated.
+
+`make test-races-negative` builds only temporary source copies under build/:
+restoring the original cancellation predicate causes the first three schedules
+to fail with lost accepted takes; restoring a snapshot-only guard causes the
+fourth to fail. All four expected failures were observed. Timeouts/crashes do not
+count as successful reproduction. The production source is never changed by it.
+
+### Transition and ownership review
+
+START claims Ready → Recording by compare/exchange. Unstarted cancellation now
+claims Ready/Priming → Finishing on that same atomic, so only one can win; a stale
+state snapshot cannot authorize cleanup. Disarm clears auto-rearm intent but
+does not itself stop an already accepted take (the module supplies STOP).
+The worker keeps draining Recording/Finishing until Stop is consumed.
+
+Shutdown/error closes admission before waiting for any in-flight begin to publish.
+Its release/acquire handshake preserves a claimed Start for diagnostics. Only the
+worker waits; engine begin/end remain nonblocking. End also claims Recording →
+Finishing atomically before flushing audio and publishing Stop, avoiding a late
+state overwrite during cleanup. Event/audio generation IDs are fixed by the
+engine's accepted begin instead of being reread during a later queue push.
+Queues retain one producer/consumer and their release/acquire publication order.
+
+### Commands and scope
+
+All commands below passed with the official Rack SDK 2.6.6 Linux x64, GCC 16.2.1,
+Python 3.14.7, and FFmpeg/ffprobe n9.0.2 (libx264 and AAC available):
+
+```sh
+make -j4 RACK_DIR=/absolute/path/to/Rack-SDK
+make test-races RACK_DIR=/absolute/path/to/Rack-SDK
+make test-races-negative RACK_DIR=/absolute/path/to/Rack-SDK
+make test RACK_DIR=/absolute/path/to/Rack-SDK
+make test-controls RACK_DIR=/absolute/path/to/Rack-SDK
+make test-posix RACK_DIR=/absolute/path/to/Rack-SDK
+make dist RACK_DIR=/absolute/path/to/Rack-SDK
+git diff --check
+```
+
+Core and module-control output checks passed: stereo audio, mono normalization,
+poly sums, silence, resampling, exact frame/sample boundaries, trigger priority,
+held/busy edges, CV-only delay, pre-trigger history and saved-setting migration.
+Constructor defaults (UTF-8/CRLF) and saved ffmpegPath overrides, including empty
+strings, passed in a temporary profile. Encoder selection preserves module/default
+path → FRAMESYNC_FFMPEG → platform fallback precedence.
+
+Linux subprocess checks passed for 512/1024 video, UTF-8/spaced executable and
+output paths, and simultaneous exclusive reservations. Missing and exited children
+failed explicitly. A deliberately stalled child hit the write deadline in 10.009 s;
+cancellation interrupted a blocked write in 0.101 s. CaptureSession shutdown
+completed within the test's three-second bound. Actual MP4/AAC streams, CSVs,
+metadata and successful temporary-file cleanup passed the validators.
+
+`make dist` produced `FrameSync-2.1.2-lin-x64.vcvplugin`. Archive inspection
+confirmed plugin.so, plugin.json, README, VALIDATION, WINDOWS-SETUP, both license
+files, and the example patch; no deleted handoff, Windows DLL, or FFmpeg binary.
+Relative Markdown file links resolve inside the package. Production symbols and
+strings contain neither deterministic test hooks nor the automatic GUI harness.
+
+The packaged plugin loaded as FrameSync 2.1.2 in Rack Pro 2.6.6's screenshot mode
+using a separate temporary profile; Recorder and SyncTest rendered and Rack exited
+normally. This was a production load/panel check, not a new live capture or AREA
+interaction test. Installed plugins and the normal Rack profile were untouched.
+The compiler emitted the existing Rack SDK Port::setChannels array-bound warning
+from SyncTest; the build succeeded. Windows tests/backends remain in the source,
+but native Windows checks and cross-compilation were not performed here.
+
+## Historical Windows 2.1.1 report — 10 October 2026
+
+Built with the official Rack SDK 2.6.6 Windows x64 and MSYS2 MinGW64 GCC 16.2.0;
+tested against installed Rack Pro 2.6.6 and FFmpeg 9.0.2 (Gyan essentials).
+This section retains the Windows-port commit
+`512c2a9e8050b62d001f04c67b53486e8d32e7d8` report. These commands and live captures
+were not rerun on Windows during the 29 October Linux integration.
+
+`make test`, `make test-controls`, and `make test-windows` passed. The output
+validators decoded the actual MP4/AAC streams and inspected CSV/metadata:
+
+- Stereo tones, polyphonic summing, L-to-R mono normalization, silence, and
+  48,001 Hz resampling passed. Video and audio start at zero; presentation
+  duration matches the exact 60 fps frame count.
+- A one-bar TOGGLE take retained 96,000 engine samples, 120 video frames and
+  CSV rows. One-sample/partial-frame takes retained their sample counts and
+  padded audio only to the final video-frame boundary.
+- Off versus two-frame CSV compensation changed only CSV sources: decoded
+  audio and video were identical for identical input. Pre-trigger history,
+  timestamp columns, saved-setting migration, and stable input IDs passed.
+- STOP priority, held/busy/disarmed edges, repeated recordings, and auto-rearm
+  passed. Tests exposed a START/disarm publication race and added a snapshot guard.
+  The integrated 2.1.2 tests later found and replaced a remaining race in that guard.
+- Both 512 and 1024 pixel sizes recorded successfully with spaces/non-ASCII
+  characters in output and executable paths. Concurrent reservations produced
+  distinct take numbers, without collisions or leftover successful temp files.
+- Missing, exited, and stalled encoder children failed clearly. Pipe writes
+  timed out within twelve seconds; cancellation/shutdown completed within three
+  seconds in the deliberate stalled-child tests. Failed takes kept diagnostics.
+
+Short isolated Rack GUI captures ran on the NVIDIA RTX 4090 at Windows 150%
+display scaling (Rack automatic pixel ratio), using the synthetic Sync Check
+patch at 50% patch zoom so barcode pixels could be decoded. No audio device was
+opened. This checks real GL_FRONT framebuffer reads and physical crop dimensions,
+rather than only synthetic worker buffers. These recordings contain silence;
+stereo routing/tone validation used the real module processor tests above.
+
+The initial 512/Off take produced 180 matching video/CSV frames and 144,000 audio
+samples in three seconds, without capture-queue overflow. Its barcode showed
+mostly two frames of render lag, with occasional three-frame observations. This
+is a functional observation, not a universal calibration for Windows or NYSTHI.
+Historical Linux measurements below are retained as separate results.
+
+Four three-second GUI takes covered both 512/1024 sizes and Off/two-frame CSV
+delay. Each produced 180 matched video/CSV frames, 144,000 engine audio samples,
+48 kHz stereo AAC with aligned three-second presentation, and zero capture-queue
+overflows. Barcode decoding passed for all 16 CV channels. Off showed mostly
+two-frame render lag; compensation brought most measured rows to zero lag,
+with occasional one-frame differences. These short takes do not establish an
+exhaustive latency benchmark or calibrate other scopes/plugins.
+
+The interactive AREA mouse/keyboard workflow and arbitrary third-party scope
+patches still need the user's first-use check. The GUI harness selected the crop
+through the same framebuffer-coordinate scaling, without exercising mouse input.
+
+## Historical Linux validation — 18 September 2026
 
 ## Version 2.1.0: stereo audio and CSV-only correction
 
@@ -33,10 +195,10 @@ of 2.1.0.
 
 ## Historical live-test setup (2.0.x)
 
-Tested with Rack Pro 2.6.6 on this Linux workstation (RTX 4090), a 48 kHz engine,
+Tested with Rack Pro 2.6.6 on Linux (RTX 4090), a 48 kHz engine,
 and Rack GUI set to 60 fps. The live test used a separate profile and a binary
-counter whose displayed code was also sent as CV. Your existing Rack session
-remained running. No audio device was opened by the test patch.
+counter whose displayed code was also sent as CV. No audio device was opened
+by the test patch.
 
 ## Version 2.0.2: TOGGLE recording input
 

@@ -1,18 +1,37 @@
-# FrameSync Recorder 2.1.0 — Linux
+# FrameSync Recorder
 
-Windows support is not implemented yet. See [Windows port and setup handoff](WINDOWS-HANDOFF.md).
+Experimental VCV Rack 2 recorder for Linux and Windows x64. Version 2.1.2
+integrates the Windows backend and strengthens the shared START/disarm handling.
+The integrated source has fresh Linux validation; native Windows execution of
+2.1.2 and interactive Windows AREA testing remain pending. Prior Windows 2.1.1
+results are recorded separately in [validation](VALIDATION.md).
+macOS is not yet supported.
 
 A separately named Rack 2 plugin based on VCV Recorder's framebuffer capture
 approach, with 60 fps H.264 video, embedded stereo AAC audio, and 16-channel
 frame-onset CSV recording.
 
-This Linux build uses the installed `/usr/bin/ffmpeg` with its libx264 encoder.
-It never invokes a shell or links FFmpeg libraries into Rack's process.
+![FrameSync Recorder beside an oscilloscope, with the AREA selection interface outlining a 512 × 512 video capture region.](docs/assets/framesync-area-selection.png)
 
-Install the `.vcvplugin` package in Rack's `plugins-lin-x64` folder, then restart
-Rack. Search the module browser for **FrameSync**. It installs alongside VCV
-Recorder and does not replace it. The source and panel are GPL-3.0-or-later.
-See `VALIDATION.md` for current functional checks and historical visual timing measurements.
+*Selecting a scope recording region in VCV Rack on Windows.*
+
+FFmpeg runs as an external process, without a shell or FFmpeg libraries linked
+into Rack. See [encoder configuration](#encoder-configuration) for executable
+resolution. The source and panel are GPL-3.0-or-later; see
+[license and upstream attribution](LICENSE.md).
+
+See [validation results and limits](VALIDATION.md) and
+[Windows setup](WINDOWS-SETUP.md). Short functional captures are not a universal
+scope-latency calibration.
+
+## Install
+
+Build a package from source using the instructions below; no public binary download
+is required. In Rack, choose **Help → Open user folder**. Copy the matching x64
+`.vcvplugin` from `dist/` into that folder's `plugins-lin-x64` (Linux) or
+`plugins-win-x64` (Windows) directory, then restart Rack to extract and load it.
+Search the module browser for **FrameSync**. It installs alongside VCV Recorder
+and does not replace it. See the [official installation guide](https://vcvrack.com/manual/Installing).
 
 ## Capture a take
 
@@ -140,9 +159,12 @@ hide them. JSON diagnostics also include audio sample counts and clipping counts
 
 Audio/CV capture never writes files, allocates memory, or waits on the encoder.
 Video capture runs on the GUI thread; a background worker handles file writing
-and encoding. Queue overflow, missing audio samples, non-finite input, a changed
-engine rate during recording, or encoder failure marks the take as an error
-instead of silently changing its timeline.
+and encoding. Audio/CV queue overflow, missing audio samples, non-finite recorded
+input, a changed engine rate during recording, or encoder failure fails the take.
+A full GUI capture queue instead drops that framebuffer read and increments
+`capture_queue_overflows` in the JSON diagnostics; scheduled video frames and CSV
+rows continue and may reuse images. Inspect this counter alongside `repeated_image`
+and capture offsets when evaluating a take.
 
 A stop between video-frame boundaries leaves a final whole video frame, so the
 clip duration may exceed the gate by less than 1/60 second. Audio stops at the
@@ -167,18 +189,88 @@ intermediate state. A busy or hidden Rack window can produce repeated images.
 Keep Rack visible while capturing. Use the Sync Check to assess the current
 system load. Apply a measured correction explicitly in the recorder's context menu.
 
-## Build
+## Build and test
 
-Obtain the official Rack 2.6.6 Linux x64 SDK and set `RACK_DIR`:
+Install VCV Rack 2 and obtain the **official Rack SDK for the target platform**
+from [VCV's build guide](https://vcvrack.com/manual/Building). The recorded builds
+used SDK 2.6.6. Follow that guide's platform build-environment prerequisites;
+building Rack itself is not necessary when using the SDK. FrameSync requires a
+C++17 compiler, GNU make, and jq; packaging uses zstd and archive tools. Keep the
+absolute source and SDK paths free of spaces.
+
+Runtime recording requires an external [FFmpeg](https://ffmpeg.org/download.html)
+with libx264 and AAC encoders. Automated output checks additionally need **Python 3,
+ffmpeg, and ffprobe on PATH**. No FFmpeg binary or Rack SDK is bundled.
+
+### Linux x64
+
+Use the Linux x64 SDK and Linux compiler/build prerequisites. From the source
+checkout:
 
 ```sh
 make -j4 RACK_DIR=/absolute/path/to/Rack-SDK
 make test RACK_DIR=/absolute/path/to/Rack-SDK
-python3 tests/check_outputs.py
 make test-controls RACK_DIR=/absolute/path/to/Rack-SDK
+make test-races RACK_DIR=/absolute/path/to/Rack-SDK
+make test-races-negative RACK_DIR=/absolute/path/to/Rack-SDK
+make test-posix RACK_DIR=/absolute/path/to/Rack-SDK
 make dist RACK_DIR=/absolute/path/to/Rack-SDK
 ```
 
-Build requires a C++17 compiler, make, jq, and the Rack SDK. Packaging also uses
-zstd. Runtime encoding requires FFmpeg with libx264 and AAC encoders. This initial implementation
-uses Linux process APIs and is not a Windows/macOS build.
+The package is `dist/FrameSync-2.1.2-lin-x64.vcvplugin`. `make test` and
+`make test-controls` include their Python output checks. The race tests force
+specific engine/worker interleavings; the negative tests build isolated copies
+with the old cancellation predicates and require the expected take-loss failures.
+`make test-posix` checks Linux encoder paths, failures, reservations, and shutdown.
+
+### Windows x64
+
+Use the Windows x64 SDK and the official MSYS2 **MinGW64** build environment
+(not the default MSYS shell). From the same integrated source in MinGW64:
+
+```sh
+make -j4 RACK_DIR=/c/dev/Rack-SDK
+make dist RACK_DIR=/c/dev/Rack-SDK
+```
+
+The package is `dist/FrameSync-2.1.2-win-x64.vcvplugin`. For tests, put Python 3
+and native Windows FFmpeg/ffprobe on PATH. The SDK provides `libRack.dll.a`;
+module-level tests also need an installed Rack's `libRack.dll` and dependencies.
+Set `RACK_RUNTIME_DIR` to that Rack installation, for example:
+
+```sh
+export FRAMESYNC_FFMPEG='C:/tools/ffmpeg/bin/ffmpeg.exe'
+export PATH='/c/tools/ffmpeg/bin:/c/path/to/python:'"$PATH"
+make test RACK_DIR=/c/dev/Rack-SDK
+make test-controls RACK_DIR=/c/dev/Rack-SDK RACK_RUNTIME_DIR='/c/Program Files/VCV/Rack2Pro'
+make test-windows RACK_DIR=/c/dev/Rack-SDK
+make test-races RACK_DIR=/c/dev/Rack-SDK
+make test-races-negative RACK_DIR=/c/dev/Rack-SDK
+```
+
+`make test` invokes `tests/check_outputs.py`. Its Python
+command defaults to `python` on Windows and can be overridden with `PYTHON=python3`.
+`FRAMESYNC_FFMPEG` must use a native Windows path, not an MSYS-only `/c/…` path.
+When moving a patch between platforms, choose a valid output folder and reselect
+AREA for the current framebuffer size/display scaling. Keep Rack's engine running
+and its window visible during recording.
+
+## Encoder configuration
+
+On both platforms, a nonempty module `ffmpegPath` takes precedence over
+`FRAMESYNC_FFMPEG`. If neither is set, the fallback is `ffmpeg.exe` on PATH for
+Windows or `/usr/bin/ffmpeg` for Linux. Use an absolute executable path for an
+explicit module setting or `FRAMESYNC_FFMPEG`.
+
+The module constructor reads the first line of
+`<Rack user folder>/FrameSync-ffmpeg.txt` into `ffmpegPath` on **both** platforms.
+Use one UTF-8 executable path without surrounding quotes. A saved patch's
+`ffmpegPath` overrides that initial value, including when saved as an empty
+string. While disarmed, **Choose FFmpeg executable…** changes the module setting,
+which is saved in the patch; it does not update the defaults file. A nonempty
+per-user default therefore also takes precedence over the environment variable.
+
+For environment-driven resolution, remove or empty the defaults file before
+creating a new module. An existing saved nonempty `ffmpegPath` must also be cleared
+(set it to `""` in the module's saved JSON data in a copy of the patch while Rack
+is closed), or use a fresh module.

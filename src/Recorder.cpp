@@ -118,6 +118,7 @@ struct FrameSyncWidget : app::ModuleWidget {
     ActionButton* armButton = nullptr;
 #ifdef FRAMESYNC_TEST_HARNESS
     double testOpened = 0;
+    double testLastLog = 0;
     bool testStarted = false;
 #endif
     FrameSyncWidget(FrameSync* module) {
@@ -150,6 +151,13 @@ struct FrameSyncWidget : app::ModuleWidget {
         // Only present in the isolated integration-test build.
         if (m->testArmOnLoad) {
             if (testOpened == 0) testOpened = glfwGetTime();
+            if (glfwGetTime() - testLastLog > 5) {
+                INFO("FrameSync test progress: state=%d sample=%lld engineFrame=%lld modules=%llu frames=%llu message=%s",
+                    int(m->capture.state()), (long long)m->latestSample.load(), (long long)APP->engine->getFrame(),
+                    (unsigned long long)APP->engine->getNumModules(),
+                    (unsigned long long)m->capture.frameCount(), m->capture.message().c_str());
+                testLastLog = glfwGetTime();
+            }
             if (!testStarted && glfwGetTime() - testOpened > 3) {
                 if (auto* target = APP->scene->rack->getModule(2)) {
                     int fw, fh; glfwGetFramebufferSize(APP->window->win, &fw, &fh);
@@ -198,6 +206,7 @@ struct FrameSyncWidget : app::ModuleWidget {
         if (m->config.directory.empty()) menu->addChild(createMenuLabel("Output folder not selected"));
         else menu->addChild(createMenuLabel(m->config.directory));
         menu->addChild(createMenuItem("Choose output folder…", "", [m] { m->chooseFolder(); }, m->active()));
+        menu->addChild(createMenuItem("Choose FFmpeg executable…", "", [m] { m->chooseEncoder(); }, m->active()));
         menu->addChild(createMenuItem("Select capture area…", "", [this] { selectRegion(); }, m->capture.state() == State::Recording));
         for (int size : {512, 1024}) menu->addChild(createCheckMenuItem(string::f("%d × %d pixels", size, size), "", [m, size] { return m->config.size == size; }, [m, size] { if (!m->active()) { m->config.size = size; m->regionSet = false; } }, m->active()));
         menu->addChild(createSubmenuItem("CSV delay compensation", m->config.cvDelayFrames ? string::f("%d frames", m->config.cvDelayFrames) : "Off", [m](ui::Menu* child) {

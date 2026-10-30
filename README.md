@@ -1,11 +1,6 @@
 # FrameSync Recorder
 
-Experimental VCV Rack 2 recorder for Linux and Windows x64. Version 2.1.2
-integrates the Windows backend and strengthens the shared START/disarm handling.
-The integrated source has fresh Linux validation; native Windows execution of
-2.1.2 and interactive Windows AREA testing remain pending. Prior Windows 2.1.1
-results are recorded separately in [validation](VALIDATION.md).
-macOS is not yet supported.
+Experimental VCV Rack 2 recorder for Linux and Windows x64.
 
 A separately named Rack 2 plugin based on VCV Recorder's framebuffer capture
 approach, with 60 fps H.264 video, embedded stereo AAC audio, and 16-channel
@@ -274,3 +269,12 @@ For environment-driven resolution, remove or empty the defaults file before
 creating a new module. An existing saved nonempty `ffmpegPath` must also be cleared
 (set it to `""` in the module's saved JSON data in a copy of the patch while Rack
 is closed), or use a fresh module.
+
+## Platform validation status
+
+Version 2.1.2
+integrates the Windows backend and strengthens the shared START/disarm handling.
+The integrated source has fresh Linux validation; native Windows execution of
+2.1.2 and interactive Windows AREA testing remain pending. Prior Windows 2.1.1
+results are recorded separately in [validation](VALIDATION.md).
+macOS is not yet supported.
